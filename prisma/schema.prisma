@@ -1,0 +1,300 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("TRADER") // TRADER | ADMIN
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  // TOTP second factor (admin security; base32 secret, only set when enrolled)
+  totpSecret   String?
+  totpEnabled  Boolean  @default(false)
+
+  referralCode String  @unique
+  referredById String?
+  referredBy   User?   @relation("Referrals", fields: [referredById], references: [id])
+  referrals    User[]  @relation("Referrals")
+
+  kyc      Kyc?
+  challenges Challenge[]
+  payments  Payment[]
+  payouts   Payout[]
+  commissions Commission[] @relation("ReferrerCommissions")
+  tickets   SupportTicket[]
+  notifications Notification[]
+  sessions  Session[]
+  passwordResets PasswordResetToken[]
+}
+
+model Kyc {
+  id             String   @id @default(cuid())
+  userId         String   @unique
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName       String
+  country        String
+  documentType   String // PASSPORT | ID_CARD
+  documentNumber String
+  status         String   @default("PENDING") // PENDING | APPROVED | REJECTED
+  note           String?
+  createdAt      DateTime @default(now())
+  reviewedAt     DateTime?
+}
+
+model Package {
+  id         String   @id @default(cuid())
+  slug       String   @unique // ONE_STEP | TWO_STEP | INSTANT
+  name       String
+  accountSize Int
+  price      Float
+  active     Boolean  @default(true)
+  sortOrder  Int      @default(0)
+  rulesJson  String // RuleConfig JSON
+  phasesJson String // PhaseConfig[] JSON
+  createdAt  DateTime @default(now())
+
+  challenges Challenge[]
+}
+
+model Challenge {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  packageId String
+  package   Package  @relation(fields: [packageId], references: [id])
+
+  type   String // ONE_STEP | TWO_STEP | INSTANT
+  phase  String @default("PHASE_1") // PHASE_1 | PHASE_2 | FUNDED
+  status String @default("PENDING_PAYMENT") // PENDING_PAYMENT | ACTIVE | PASSED | FAILED | FUNDED | BREACHED
+
+  accountSize     Int
+  startBalance    Float
+  currentBalance  Float  @default(0)
+  peakBalance     Float  @default(0)
+  dailyStartBalance Float?
+  dailyLossUsed   Float  @default(0)
+
+  // Accounting (Phase A): currentBalance = trading balance (start ± realized trading P&L only).
+  // Payouts never modify currentBalance; they accrue here so risk rules stay free of phantom drawdown.
+  paidWithdrawals Float  @default(0) // cumulative PAID payouts (trader-side)
+  reservedExposure Float @default(0) // sum of stakes of OPEN terminal trades
+
+  profitTarget       Float
+  maxDailyLoss       Float
+  maxTotalDrawdown   Float
+  consistencyPct     Float  @default(30)
+  minTradingDays     Int    @default(5)
+  tradingDaysDone    Int    @default(0)
+  lastTradeDay       String?
+  // JSON array of counted UTC trading-day keys — set-based so out-of-order
+  // settlements can never double-count a day. Reset on phase advance.
+  tradingDayKeys     String @default("[]")
+  bestDayProfit      Float  @default(0)
+
+  brokerAccountId String?
+  brokerApiToken  String?
+
+  startedAt    DateTime?
+  phaseEndsAt  DateTime?
+  fundedAt     DateTime?
+  failedAt     DateTime?
+  breachReason String?
+  payoutsDone  Int      @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  trades  Trade[]
+  payouts Payout[]
+  payments Payment[]
+
+  @@index([userId, status])
+}
+
+model Trade {
+  id            String    @id @default(cuid())
+  challengeId   String
+  challenge     Challenge @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  brokerTradeId String    @unique
+  symbol        String
+  direction     String // UP | DOWN
+  stake         Float
+  payout        Float?
+  profit        Float     @default(0)
+  status        String    @default("CLOSED") // OPEN | CLOSED
+  entryPrice    Float?
+  closePrice    Float?
+  payoutPct     Float?
+  expiryAt      DateTime?
+  openedAt      DateTime
+  closedAt      DateTime  // economic close time (expiryAt for terminal trades)
+  settledAt     DateTime? // wall-clock time settlement was applied
+  createdAt     DateTime  @default(now())
+
+  @@index([challengeId, closedAt])
+  @@index([challengeId, status])
+}
+
+model Payment {
+  id          String     @id @default(cuid())
+  userId      String
+  user        User       @relation(fields: [userId], references: [id])
+  challengeId String?
+  challenge   Challenge? @relation(fields: [challengeId], references: [id])
+  amount      Float
+  currency    String     @default("USD")
+  method      String // USDT_TRC20 | USDT_ERC20
+  address     String?
+  txHash      String?    @unique
+  status      String     @default("PENDING") // PENDING | CONFIRMED | FAILED | REFUNDED
+  createdAt   DateTime   @default(now())
+  confirmedAt DateTime?
+
+  commissions Commission[]
+}
+
+model Payout {
+  id            String   @id @default(cuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id])
+  challengeId   String
+  challenge     Challenge @relation(fields: [challengeId], references: [id])
+  amount        Float    // what the trader receives (from their profit share)
+  traderAmount  Float?   // = amount (auditable alias)
+  firmAmount    Float?   // firm's 20% share of the profit consumed by this withdrawal
+  profitConsumed Float?  // total profit consumed = amount / traderSharePct
+  walletAddress String
+  network       String    @default("TRC20")
+  status        String    @default("REQUESTED") // REQUESTED | APPROVED | PAID | REJECTED
+  note          String?
+  createdAt     DateTime  @default(now())
+  processedAt   DateTime?
+
+  @@index([status])
+}
+
+model Commission {
+  id         String   @id @default(cuid())
+  referrerId String
+  referrer   User     @relation("ReferrerCommissions", fields: [referrerId], references: [id])
+  paymentId  String   @unique // at most one commission per qualifying payment
+  payment    Payment  @relation(fields: [paymentId], references: [id])
+  amount     Float
+  status     String   @default("PENDING") // PENDING | PAID
+  createdAt  DateTime @default(now())
+  paidAt     DateTime?
+
+  @@index([referrerId, status])
+}
+
+model SupportTicket {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  subject   String
+  status    String   @default("OPEN") // OPEN | REPLIED | CLOSED
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  messages TicketMessage[]
+}
+
+model TicketMessage {
+  id         String   @id @default(cuid())
+  ticketId   String
+  ticket     SupportTicket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId   String
+  authorRole String // TRADER | ADMIN
+  body       String
+  createdAt  DateTime @default(now())
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String // INFO | BREACH | PAYOUT | PAYMENT | SYSTEM
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, read])
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// Server-side session registry. JWTs carry the session id (jti); logout and
+// password changes revoke rows here so previously issued tokens stop working
+// before their natural expiry. Works across app instances (shared DB).
+model Session {
+  id        String    @id // JWT jti
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now())
+  expiresAt DateTime
+  revokedAt DateTime?
+  userAgent String?
+
+  @@index([userId, revokedAt])
+}
+
+// Single-use, expiring password-reset tokens. Only the sha256 hash is stored;
+// the raw token exists solely in the (emailed) link.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  requestedIp String?
+
+  @@index([userId, usedAt])
+}
+
+// Database-backed fixed-window rate limiter. Shared by all app instances
+// through the database — safe for multi-instance deployments (unlike
+// process-memory limiters). Keys are opaque (e.g. "login:ip:1.2.3.4").
+model RateLimit {
+  key         String   @id
+  windowStart DateTime
+  count       Int      @default(0)
+  updatedAt   DateTime @updatedAt
+}
+
+// Immutable financial/privileged audit trail. Enforced append-only at the
+// database level (see migration script: BEFORE UPDATE/DELETE triggers).
+// Never contains passwords, tokens, raw reset links, or KYC document data.
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actorEmail String?
+  action     String   // e.g. PAYMENT_CONFIRMED, PAYOUT_PAID, USER_ROLE_CHANGED
+  entityType String // e.g. Payment, Payout, User, Setting, Challenge
+  entityId   String?
+  outcome    String   // SUCCESS | FAILURE
+  beforeJson String?  // sanitized snapshot
+  afterJson  String?  // sanitized snapshot
+  metaJson   String?
+  createdAt  DateTime @default(now())
+
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+}

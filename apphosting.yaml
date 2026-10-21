@@ -1,0 +1,19 @@
+runConfig:
+  cpu: 1
+  memoryMiB: 512
+  minInstances: 0
+  maxInstances: 3
+  concurrency: 80
+
+env:
+  - variable: DATABASE_URL
+    secret: DATABASE_URL
+    availability:
+      - BUILD
+      - RUNTIME
+  - variable: SESSION_SECRET
+    secret: SESSION_SECRET
+  - variable: CRON_SECRET
+    secret: CRON_SECRET
+  - variable: PRICE_SALT
+    secret: PRICE_SALT

@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/prisma
+    environment:
+      - DATABASE_URL=file:/app/prisma/prod.db
